@@ -34,6 +34,8 @@ jobs:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 不能用 secrets.GITHUB_TOKEN：GitHub 不允许它改 workflow 文件，一律 403；
+          # 要用下面这个你自己建的 PAT（见 README 的 WORKFLOW_PAT 一节）
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           # 首次调试可以临时加这一行看原始返回，调通后删掉：
           # FARM_DEBUG: "1"
