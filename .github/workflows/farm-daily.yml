@@ -1,13 +1,22 @@
 name: 农场每日任务
 
-# 每天 11:15 北京时间（03:15 UTC）自动跑；也可以在 Actions 页点 Run workflow 手动跑
+# 定时逻辑（不要删“下次成熟”那行标记，脚本靠它定位改写）：
+# - 下次成熟：脚本每次跑完按地块 remainingSec 算出成熟时间，自动改写这一行的 cron，
+#   到点自动跑一次；收完、重种后，下一轮成熟时间会再次改写，链条这样续下去。
+# - 每日 11:15 北京时间兜底（03:15 UTC）：成熟定时改写失败时，仍保证每天至少跑一次，
+#   兜底轮也会重新算成熟时间并改写，链条能自己接回来。
+# 也可以在 Actions 页点 Run workflow 手动跑，手动轮同样会改写成熟定时。
 on:
   schedule:
+    # 下次成熟（脚本自动更新）
+    - cron: "34 21 28 10 *"
+    # 每日 11:15 北京时间兜底
     - cron: "15 3 * * *"
   workflow_dispatch:
 
+# 脚本要改写本文件，必须有写权限
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   farm:
@@ -19,11 +28,12 @@ jobs:
           python-version: "3.12"
       - name: 安装依赖
         run: pip install telethon requests
-      - name: 跑每日任务（签到 / 收菜 / 重种 / 偷菜）
+      - name: 跑农场任务（签到 / 收菜 / 重种 / 偷菜）
         run: python farm_daily.py
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 首次调试可以临时加这一行看原始返回，调通后删掉：
           # FARM_DEBUG: "1"
