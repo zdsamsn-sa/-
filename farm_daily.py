@@ -160,6 +160,67 @@ async def checkin(client):
         return (resp.text or "").strip()
 
 
+def steal_loop(init_data, debug):
+    """偷菜：照 UI 的做法——进一家就把这家可偷的地块偷光，再换一家。
+
+    旧 bug：每偷 1 次就重 visit，服务端随后经常直接报“没有可偷的邻居菜园”，
+    明明同家还剩好几块成熟菜却只偷到 1 次就停。UI 规则：成功后不重 visit，
+    只在本地把那块标为已偷（即一块一天只能偷一次），继续偷同家下一块；
+    只有偷失败时才换一家。
+
+    返回 (偷菜次数, 共偷 GB)。
+    """
+    stolen_gb = 0
+    steals = 0
+    no_target_victim = None
+    for _ in range(20):  # 安全上限（visit 次数）
+        v = api("/farm/api/visit", init_data)
+        if not v.get("ok", True) or v.get("error"):
+            log(f"逛邻居结束：{v.get('error', '')}")
+            break
+        left = v.get("stealLeftToday", 0)
+        if left <= 0:
+            log("偷菜次数已用完")
+            break
+        if debug:
+            log("visit 原始：" + json.dumps(v, ensure_ascii=False)[:2000])
+        victim_id = v.get("victimId")
+        victim_name = v.get("victimName")
+        # 本家可偷的地块：成熟、没偷过、还有可偷余量（一块一天只能偷一次）
+        targets = [p for p in v.get("plots", [])
+                   if p.get("mature") and not p.get("stolenByMe")
+                   and (p.get("stealableLeftGb") or 0) > 0]
+        if not targets:
+            if victim_id == no_target_victim:
+                log("连续两家都无可偷地块，结束偷菜")
+                break
+            no_target_victim = victim_id
+            log(f"邻居 {victim_name} 无可偷地块，换一家")
+            continue
+        no_target_victim = None
+        # 把这家的可偷地块偷光再换一家
+        out_of_tries = False
+        for target in targets:
+            s = api("/farm/api/steal", init_data,
+                    victimId=victim_id, slot=target["slot"])
+            if not s.get("ok", True):
+                log(f"偷菜失败（{s.get('error', '')}），换一家")
+                break  # JS 逻辑：偷失败就换一家
+            gained = s.get("gainedGb", 0)
+            stolen_gb += gained
+            steals += 1
+            log(f"偷菜：{victim_name} 地块 {target['slot']} +{gained}GB，"
+                f"今日还剩 {s.get('stealLeftToday')} 次")
+            if (s.get("stealLeftToday") or 0) <= 0:
+                log("偷菜次数已用完")
+                out_of_tries = True
+                break
+        if out_of_tries:
+            break
+    log(f"偷菜：{steals} 次，共 +{stolen_gb}GB")
+    return steals, stolen_gb
+
+
 async def run_cycle(client, label, debug):
     """跑一轮完整任务：签到 -> initData -> 收菜 -> 重种 -> 偷菜 -> 算下次成熟。
 
@@ -215,49 +276,8 @@ async def run_cycle(client, label, debug):
     log(f"重种：{planted} 块，剩余种子 {state.get('seeds')}")
     summary["planted"] = planted
 
-    # 6. 偷菜循环（按 JS 逻辑：偷失败就换一家，次数用完即停）
-    stolen_gb = 0
-    steals = 0
-    no_target_victim = None
-    for _ in range(20):  # 安全上限
-        v = api("/farm/api/visit", init_data)
-        if not v.get("ok", True) or v.get("error"):
-            log(f"逛邻居结束：{v.get('error', '')}")
-            break
-        left = v.get("stealLeftToday", 0)
-        if left <= 0:
-            log("偷菜次数已用完")
-            break
-        if debug:
-            log("visit 原始：" + json.dumps(v, ensure_ascii=False)[:2000])
-        target = None
-        for p in v.get("plots", []):
-            if (p.get("mature") and not p.get("stolenByMe")
-                    and (p.get("stealableLeftGb") or 0) > 0):
-                target = p
-                break
-        if target is None:
-            if v.get("victimId") == no_target_victim:
-                log("连续两家都无可偷地块，结束偷菜")
-                break
-            no_target_victim = v.get("victimId")
-            log(f"邻居 {v.get('victimName')} 无可偷地块，换一家")
-            continue
-        no_target_victim = None
-        s = api("/farm/api/steal", init_data,
-                victimId=v["victimId"], slot=target["slot"])
-        if not s.get("ok", True):
-            log(f"偷菜失败（{s.get('error', '')}），换一家")
-            continue
-        gained = s.get("gainedGb", 0)
-        stolen_gb += gained
-        steals += 1
-        log(f"偷菜：{v.get('victimName')} 地块 {target['slot']} +{gained}GB，"
-            f"今日还剩 {s.get('stealLeftToday')} 次")
-        if (s.get("stealLeftToday") or 0) <= 0:
-            log("偷菜次数已用完")
-            break
-    log(f"偷菜：{steals} 次，共 +{stolen_gb}GB")
+    # 6. 偷菜（进一家偷光再换一家，见 steal_loop）
+    steals, stolen_gb = steal_loop(init_data, debug)
     summary["steal"] = (steals, stolen_gb)
 
     # 7. 重新拉一次最终状态，再算下次成熟时间（plant 返回不一定带 plots，
