@@ -276,6 +276,19 @@ async def run_cycle(client, label, debug):
     return summary, at_cst, secs
 
 
+def token_kind(token):
+    """只看 token 的公开类型前缀（不碰 token 本体、不打印 token）。
+
+    ghs_ = GITHUB_TOKEN（GitHub 不允许它改 workflow 文件）；
+    github_pat_/ghp_ = 你自己建的 PAT（有写权限就能改）。
+    """
+    if token.startswith("ghs_"):
+        return "GITHUB_TOKEN"
+    if token.startswith("github_pat_") or token.startswith("ghp_"):
+        return "PAT"
+    return "未知类型"
+
+
 def update_workflow_cron(at_cst):
     """把 workflow 里标记的那行 cron 改成成熟时间（UTC）。失败只记日志，不抛异常。
 
@@ -287,14 +300,26 @@ def update_workflow_cron(at_cst):
     if not repo or not token:
         log("不在 Actions 环境（无 GITHUB_REPOSITORY/GH_TOKEN），跳过更新 workflow 定时")
         return
+    kind = token_kind(token)
+    if kind == "GITHUB_TOKEN":
+        # 平台硬限制：GITHUB_TOKEN 改 workflow 文件必 403，不用白跑一次
+        log("当前 GH_TOKEN 是 GITHUB_TOKEN，GitHub 不允许它改 workflow 文件，跳过写入；"
+            "请确认仓库里的 yml 已同步到 GH_TOKEN: ${{ secrets.WORKFLOW_PAT }} 那版，"
+            "且 WORKFLOW_PAT 已建好")
+        return
+    log(f"当前 GH_TOKEN 类型：{kind}，准备改写 workflow 定时")
     try:
         utc = at_cst.astimezone(timezone.utc)
         new_cron = f"{utc.minute} {utc.hour} {utc.day} {utc.month} *"
         headers = {"Authorization": f"Bearer {token}",
                    "Accept": "application/vnd.github+json"}
         url = f"https://api.github.com/repos/{repo}/contents/{WORKFLOW_PATH}"
-        r = requests.get(url, headers=headers, timeout=30)
-        r.raise_for_status()
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            log(f"读取 workflow 文件失败（请检查 token 是否有该仓库的读权限）：{e}")
+            return
         data = r.json()
         content = base64.b64decode(data["content"]).decode("utf-8")
         pattern = re.compile(
@@ -311,8 +336,16 @@ def update_workflow_cron(at_cst):
             "content": base64.b64encode(new_content.encode("utf-8")).decode("ascii"),
             "sha": data["sha"],
         }
-        r2 = requests.put(url, headers=headers, json=body, timeout=30)
-        r2.raise_for_status()
+        try:
+            r2 = requests.put(url, headers=headers, json=body, timeout=30)
+            r2.raise_for_status()
+        except Exception as e:
+            if "403" in str(e):
+                log("写入 workflow 文件被拒（403）：请检查 WORKFLOW_PAT 的 Contents "
+                    "是否为 Read and write、仓库是否选了 DVZ；不影响本次收菜，兜底轮会再试")
+            else:
+                log(f"写入 workflow 文件失败（不影响本次收菜，兜底轮会再试）：{e}")
+            return
         log(f"workflow 定时已更新为 {new_cron}（UTC，即成熟时间）")
     except Exception as e:
         log(f"更新 workflow 定时失败（不影响本次收菜，兜底轮会再试）：{e}")
